@@ -1,0 +1,197 @@
+---
+title: "Belgrade Housing Report"
+output: 
+  flexdashboard::flex_dashboard
+---
+
+
+```{r setup, include=FALSE}
+
+library(tidyverse) # Main Package - Loads dplyr, purrr
+library(tictoc)
+library(DataExplorer)
+library(h2o)
+library(magrittr)
+library(dplyr)
+library(plotly)
+library(scales)
+library(tidyquant)
+library(highcharter)
+
+a <- as_tibble(read.csv("00_data/Stanovi.csv"))
+
+# iz infrastrukture izvuci podatke o liftu, terasi, lodji, tavanu i podrumu
+a <- a %>%
+  #mutate(infrastruktura = str_replace(infrastruktura,"[^\x01-\x7F]", "dj")) %>%
+  add_column(Lift=0, Terasa=0, Lodja=0, Tavan=0, Podrum=0) %>%
+  mutate_at(c("Lift","Terasa","Lodja","Tavan","Podrum"), ~ifelse(is.na(infrastruktura ),NA,0)) %>%
+  mutate(Lift = ifelse(grepl("Lift",infrastruktura),1,Lift)) %>% 
+  mutate(Lift = ifelse(grepl("Lifta",infrastruktura),2,Lift)) %>%              
+  mutate(Terasa = ifelse(grepl("Terasa",infrastruktura),1,Terasa)) %>%
+  mutate(Terasa = ifelse(grepl("Terase",infrastruktura),2,Terasa)) %>%          
+  mutate(Lodja = ifelse(grepl("Loda", infrastruktura),1,Lodja)) %>% 
+  mutate(Lodja = ifelse(grepl("Lode", infrastruktura),2,Lodja)) %>%          
+  mutate(Tavan = ifelse(grepl("Tavan", infrastruktura),1,Tavan)) %>%           
+  mutate(Podrum= ifelse(grepl("Podrum", infrastruktura),1,Podrum))
+
+# izbacivanje varijabli
+a <- a %>% select(-godina_izgradnje)
+
+# kodovanje parking garaze kao 0 i 1 (nema i ima)
+a$parking_garaza <- ifelse(is.na(a$parking_garaza),0,1)
+
+# Rekao Milan da ne mjesamo engleski i srpski
+a <- a %>% 
+  mutate(stanje = str_replace_all(stanje,"old","Staro")) %>% 
+  mutate(stanje = str_replace_all(stanje,"luxury","Luksuz"))
+
+# faktorisanje
+
+cols <- c("Lodja", "Lift", "Terasa", "Tavan", "Podrum", "opstina", 
+          "sprat", "parking_garaza", "grejanje", "stanje", "mesto")
+
+a %<>%
+  mutate_each_(funs(factor(.)),cols)
+
+df <- a %>% select(-cena_po_m2)
+
+varimp <- read.csv("varimp.csv")
+leaderboard <- read.csv("h2oleaderboard.csv")
+
+```
+
+
+# Broj soba
+```{r}
+# Distribucija broja soba
+ggplotly(ggplot(aes(x=broj_soba), data=a) + 
+           geom_histogram(fill='red', bins=20, stat="count") + 
+           ggtitle('Distribucija broja soba'))
+```
+# Cijena/opstina
+```{r}
+# Prosjecna cijena po opstini
+a %>% 
+  group_by(opstina) %>% 
+  filter (opstina != "") %>%
+  summarize(across(cena, mean)) %>%
+  arrange(desc(cena)) %>%
+  mutate(opstina=factor(opstina,
+                        levels = c("Savski Venac", "Stari Grad", "Vracar", "Novi Beograd",
+                                   "Vozdovac", "Cukarica", "Zvezdara", "Zemun", "Palilula",
+                                   "Rakovica", "Surcin", "Obrenovac", "Lazarevac",
+                                   "Grocka", "Mladenovac", "Barajevo", "Sopot"))) %>%
+  plot_ly(
+    x = ~opstina,
+    y = ~cena,
+    name = "Prosjecna cijena po opstini",
+    type = "bar"
+  ) %>%
+  layout(
+    title = "Prosjecna cijena po opstini",
+    xaxis = list(title = "Opstina"),
+    yaxis = list(title = "Cijena")
+  )
+```
+
+# Cijena/stanje
+```{r}
+# Prosjecna cijena po stanju stana
+a %>%
+  mutate(stanje = factor(stanje, 
+                         levels = c("U izgradnji","Novo","Luksuz",
+                                    "Renovirano","Uobicajeno",
+                                    "Potrebno renoviranje", "Staro"))) %>%
+  group_by(stanje) %>% 
+  summarize(across(cena, mean)) %>% 
+  plot_ly(
+    x = ~stanje,
+    y = ~cena,
+    name = "Prosjecna cijena po stanju",
+    type = "bar"
+  ) %>% 
+  layout(
+    title = "Prosjecna cijena po stanju stana",
+      xaxis = list(title = "Stanje"),
+      yaxis = list(title = "Cijena")
+    )
+
+```
+
+# Povrsina/cijena
+```{r}
+# Odnos Povrsine i cijene
+
+a %>% filter(povrsina < 500) %>%
+  ggplot(aes(x=povrsina, y=cena)) + geom_point(col="black") +
+  geom_smooth(se=F) +
+  scale_y_continuous(labels = dollar_format(suffix="€", prefix="")) +
+  labs(title= "Povrsina / Cijena",
+       x= "Povrsina",
+       y= "Cijena") + theme_tq()
+```
+
+
+# Modeli
+
+```{r}
+leaderboard <- leaderboard %>%
+  mutate(Percent = round(mae/mean(a$cena),2)*100)
+knitr::kable(leaderboard)
+```
+
+# Variable Importance
+```{r}
+varimp %>%
+  mutate(variable = sapply(str_split(variable,"\\."),'[',1)) %>% 
+  distinct(variable, .keep_all=TRUE) %>%
+  top_n(15) %>% 
+  hchart('bar', hcaes(x = variable, y = scaled_importance)) %>%  
+  hc_xAxis(title = list(text = ""))%>% 
+  hc_yAxis(title = list(text = "Scaled Importance"), max=1) %>% 
+  hc_title(text = "Variable Importance") %>%
+  hc_add_theme(hc_theme_elementary())
+```
+
+
+### Plot Predictions
+
+```{r pressure, echo=FALSE, out.width = '100%'}
+true_values <- read.csv("true_values.csv")
+ggplotly(
+true_values %>%
+  ggplot(aes(eur_sqm,Predicted)) +
+  geom_point() +
+  labs(title = "Actual values vs Predictions",
+       x = "Actual") +
+  theme_tq() +
+geom_abline(slope=1, size=1, color="blue") +
+scale_y_continuous(labels = dollar_format(suffix="\u20ac", prefix ="", big.mark = ","), 
+                   breaks = seq(1000, 8000, 1000),
+                   limits = c(0,8000)) +
+scale_x_continuous(labels = dollar_format(suffix="\u20ac", prefix ="", big.mark = ","),
+                   breaks = seq(1000, 8000, 1000),
+                   limits = c(0,8000))
+)
+  
+  
+```
+
+
+### Predictions vs Actual
+```{r}
+all_values <- read.csv("../all_values.csv")
+
+ggplotly(all_values %>%
+  filter(as.numeric(observation) < 41) %>%
+  mutate(key = fct_rev(key)) %>% 
+  # Visualize
+  ggplot(aes(x = observation, y = value, color = key)) +
+  geom_point(size = 3) +
+  theme_tq() +
+  scale_color_tq() +
+  coord_flip() +
+  scale_x_continuous(breaks = seq(1,40)) +
+  scale_y_continuous(labels = dollar_format(suffix="\u20ac", prefix ="", big.mark = ",")) +
+  labs(title = "Prediction vs Actual"))
+```
